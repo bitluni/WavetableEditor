@@ -1,0 +1,394 @@
+<head>
+<title>bitluni's Watable Editor</title>
+<script>
+window.AudioContext = window.AudioContext || window.webkitAudioContext;
+var context = new AudioContext();
+
+var project = {
+	name: "sounds",
+	sampleRate: 22050,
+	normalize: true,
+	wavetable: []
+	};
+
+function objFromId(id)
+{
+	for(var i = 0; i < project.wavetable.length; i++)
+		if(project.wavetable[i].id === id)
+			return project.wavetable[i];
+	return null;
+}
+
+function addSound(id, buffer)
+{
+	objFromId(id).buffer = buffer;
+	update();
+}
+
+function playSound(id)
+{
+	var obj = objFromId(id);
+	if(obj.bs)
+		stopSound(id);
+	obj.bs = context.createBufferSource();
+	obj.bs.buffer = obj.buffer;
+	obj.bs.connect(context.destination);
+	obj.bs.start();
+}
+
+function stopSound(id)
+{
+	var obj = objFromId(id);
+	if(!obj.bs) return;
+	obj.bs.stop();
+	obj.bs.disconnect();
+	obj.bs = null;
+}
+
+function upSound(id)
+{
+	var wavetable = project.wavetable;
+	for(var i = 1; i < wavetable.length; i++)
+		if(wavetable[i].id === id)
+		{
+			var w = wavetable[i - 1];
+			wavetable[i - 1] = wavetable[i];
+			wavetable[i] = w;
+			update();
+			return;
+		}
+}
+
+function downSound(id)
+{
+	var wavetable = project.wavetable;
+	for(var i = 0; i < wavetable.length - 1; i++)
+		if(wavetable[i].id === id)
+		{
+			var w = wavetable[i + 1];
+			wavetable[i + 1] = wavetable[i];
+			wavetable[i] = w;
+			update();
+			return;
+		}
+}
+
+function deleteSound(id)
+{
+	var wavetable = project.wavetable;
+	for(var i = 0; i < wavetable.length; i++)
+		if(wavetable[i].id === id)
+		{
+			wavetable.splice(i, 1);
+			update();
+			return;
+		}
+}
+
+function newButton(text, cb)
+{
+	var b = document.createElement("button");
+	b.innerHTML = text;
+	b.onclick = cb;
+	return b;
+}
+
+function addFile(file, id)
+{		
+	var obj = {"id": id, "name": file.name, "type": file.type};
+	project.wavetable.push(obj);
+	var reader = new FileReader();
+	reader.onload = function(e){
+		objFromId(id).source = Array.from(new Uint8Array(e.target.result));
+		context.decodeAudioData(e.target.result, 
+		function(buffer){
+			addSound(id, buffer)
+		});
+	};
+	reader.readAsArrayBuffer(file);
+}
+
+function addFiles(event)
+{
+	for(var i = 0; i < event.target.files.length; i++)
+	{
+		var file = event.target.files[i];
+		addFile(file, file.name.replace(/[^A-Z0-9]/ig, "_") + Math.floor(Math.random() * 1000000))
+	}
+	event.target.value = "";
+}
+
+function audioBufferToArray(audioBuffer, normalize, sampleRate)
+{
+	var buffer = audioBuffer.getChannelData(0);
+		
+	if(audioBuffer.numberOfChannels > 1)
+	{
+		for(var c = 1; c < audioBuffer.numberOfChannels; c++)
+		{
+			var cb = audioBuffer.getChannelData(c);
+			for(var i = 0; i < length; i++)
+				buffer[i] += cb[i];
+		}
+	}
+	
+	if(sampleRate != audioBuffer.sampleRate)
+	{
+		var scale = audioBuffer.sampleRate / sampleRate;
+		var length = Math.floor((buffer.length - 2) / scale); 
+		var b = new Float32Array(length);
+		for(var i = 0; i < length; i++)
+		{
+			var s = i * scale;
+			var si = Math.floor(s);
+			var f = s - si;
+			b[i] = buffer[si] * (1 - f) + buffer[si + 1] * f;
+		}
+		buffer = b;
+	}
+	
+	if(normalize)
+	{
+		var max = 0;
+		for(var i = 0; i < buffer.length; i++)
+			max = Math.max(Math.abs(buffer[i]), max);
+		if(max != 0)
+			for(var i = 0; i < buffer.length; i++)
+				buffer[i] /= max;
+	}	
+	
+	return buffer;
+}
+
+function wavetableToHeader(name, sampleRate)
+{
+	var wavetable = project.wavetable;
+	var offsets = [0];
+	for(var i = 0; i < wavetable.length; i++)
+		offsets.push(offsets[i] + wavetable[i].array.length);
+	var b = new Int8Array(offsets[offsets.length - 1]);
+	for(var i = 0; i < wavetable.length; i++)
+		for(var j = 0; j < wavetable[i].array.length; j++)
+			b[offsets[i] + j] = Math.round(wavetable[i].array[j] * 127);
+	
+	var text = "const int " + name + "Offsets[] = {"
+	for(var i = 0; i < offsets.length; i++)
+		text += offsets[i] + ", ";
+	text += "};\r\n";
+	
+	text += "const signed char " + name + "Samples[] = {"
+	for(var i = 0; i < b.length; i++)
+	{
+		if((i & 63) == 0) text += "\r\n";
+		text += b[i] + ", ";
+	}
+	text += "};\r\n";
+	text += "Wavetable " + name + "(" + name + "Samples, " + wavetable.length + ", " + name + "Offsets, " + sampleRate + ");\r\n";
+	return text;
+}
+
+function getMeta()
+{
+	var text = "";
+	for(var i = 0; i < project.wavetable.length; i++)
+		text += i + ", " + project.wavetable[i].name + "\r\n";
+	return text;
+}
+
+function addListItem(i, id, name)
+{
+	var soundDiv = document.createElement("div");			
+	soundDiv.id = id;
+	var index = document.createElement("span");
+	index.className = "num";
+	index.innerHTML = i;
+	soundDiv.appendChild(index);
+	soundDiv.appendChild(newButton("&#10008;", function(){ deleteSound(id)}));
+	soundDiv.appendChild(newButton("&#x2B07;", function(){ downSound(id); }));
+	soundDiv.appendChild(newButton("&#x2B06;", function(){ upSound(id); }));
+	soundDiv.appendChild(newButton("&#x2BC0;", function(){ stopSound(id); }));
+	soundDiv.appendChild(newButton("&#x2BC8;", function(){ playSound(id); }));
+	var span = document.createElement("span");
+	span.innerHTML = name;
+	soundDiv.appendChild(span);
+	document.getElementById("sounds").appendChild(soundDiv);
+}
+
+function loadProject(event)
+{
+	var reader = new FileReader();
+	reader.onload = function(e){
+		project = JSON.parse(e.target.result);
+		document.getElementById("name").value =	project.name;
+		document.getElementById("samplerate").value = project.sampleRate;
+		document.getElementById("normalize").checked = project.normalize;
+		for(var i = 0; i < project.wavetable.length; i++)
+			context.decodeAudioData((new Uint8Array(project.wavetable[i].source)).buffer, 
+			(function(id){ return function(buffer){
+				addSound(id, buffer)
+			}})(project.wavetable[i].id));
+	};
+	reader.readAsText(event.target.files[0]);
+	document.getElementById("files").className = "hidden";
+	document.getElementById("filearea").innerHTML = "";	
+}
+
+function saveProject()
+{	
+	document.getElementById("filearea").innerHTML = "";
+	var fileArea = document.getElementById("filearea");
+	var file = document.createElement("a");
+	file.className = "block file";
+	file.download = file.innerHTML = document.getElementById("name").value + ".json";
+	for(var i = 0; i < project.wavetable.length; i++)
+		if(project.wavetable[i].bs)
+			delete project.wavetable[i].bs;
+	file.href = URL.createObjectURL(new Blob([JSON.stringify(project)], {type: "application/json"}));
+	fileArea.appendChild(file);
+	document.getElementById("files").className = "menu";
+}
+
+function saveHeader()
+{	
+	document.getElementById("filearea").innerHTML = "";
+	var fileArea = document.getElementById("filearea");
+	var file = document.createElement("a");
+	var meta = document.createElement("a");
+	meta.className = file.className = "block file";
+	file.download = file.innerHTML = project.name + ".h";
+	meta.download = meta.innerHTML = project.name + ".txt";
+	for(var i = 0; i < project.wavetable.length; i++)
+		project.wavetable[i].array = audioBufferToArray(project.wavetable[i].buffer, project.normalize, project.sampleRate);
+	file.href = URL.createObjectURL(new Blob([wavetableToHeader(project.name, project.sampleRate)], {type: "text/plain"}));
+	meta.href = URL.createObjectURL(new Blob([getMeta()], {type: "text/plain"}));
+	fileArea.appendChild(file);
+	fileArea.appendChild(meta);
+	document.getElementById("files").className = "menu";
+}
+
+function update()
+{	
+	for(var i = 0; i < project.wavetable.length; i++)
+		if(!project.wavetable[i].buffer)
+			return;
+	project.name = document.getElementById("name").value;
+	project.sampleRate = document.getElementById("samplerate").value;
+	project.normalize = document.getElementById("normalize").checked;
+
+	document.getElementById("sounds").innerHTML = "";
+	for(var i = 0; i < project.wavetable.length; i++)
+		addListItem(i, project.wavetable[i].id, project.wavetable[i].name);
+	document.getElementById("files").className = "hidden";
+	document.getElementById("filearea").innerHTML = "";
+}
+
+</script>
+<style>
+	#sounds
+	{
+	}
+	.num
+	{
+		width: 20px;
+		display: inline-block;
+	}
+	.option
+	{
+		margin: 3px;
+	}
+	.options
+	{
+		background-color: #aeaeee;
+	}
+	.soundfiles
+	{
+		background-color: #aeeeee;
+	}
+	.menu
+	{
+		background-color: #eeeeee;
+		padding: 1px;
+		display: block;
+		margin: 3px;
+		padding: 5px;
+		border-radius: 3px;		
+	}
+	#sounds div
+	{
+		margin: 2px;
+		border-radius: 3px;
+		background-color: #aeeeae;
+		padding: 10px;
+		overflow: hidden;
+	}
+	#sounds div > *
+	{
+		margin-right: 5px;
+		vertical-align: middle;
+	}
+	#sounds button
+	{
+		float: right;
+	}
+	h1
+	{
+		color: white;
+		background: #800000;
+		padding: 10px;
+		border-radius: 5px;
+	}
+	.block
+	{
+		padding: 5px;
+		display: inline-block;
+		border-radius: 3px;
+	}
+	.project
+	{
+		background-color: #eeeeae;
+	}
+	.hidden
+	{
+		display: none;
+	}
+	.file
+	{
+		background-color: #ffdddd;
+		margin-right: 5px;
+	}
+	h1
+	{
+		margin-bottom: 5px;
+	}
+</style>
+</head>
+<body style="font-family: arial">
+<h1>bitluni's Wavetable Editor</h1>
+<div style="max-width: 700px">
+	<div class="menu">
+		<span class="project block">
+			<button title="Open project file" onclick="document.getElementById('openproject').click()">&#x1F4C2;</button> 
+			<input id="openproject" type="file" onchange="loadProject(event)" accept=".json" hidden>
+			<button title="Generate project file" onclick="saveProject();">&#128190;</button>
+		</span>
+		<span class="block soundfiles">
+			<button title="Add sound files" onclick="document.getElementById('addsounds').click()">&#127925;</button>
+			<input id="addsounds" type="file" onchange="addFiles(event)" accept="audio/*" multiple hidden>
+			<button title="Export wavetable header" onclick="saveHeader();" style="font-size: 15px; font-weight:bold">.h</button>
+		</span>
+		<span class="block options">
+			<span class="option">name <input id="name" type="text" value="sounds" style="width: 80px" onchange="update()"></span>
+			<span class="option"><input id="normalize" type="checkbox" checked onchange="update()">normalize</span>
+			<span class="option">sampling rate <input id="samplerate" type="number" value="22050" style="width: 60px" onchange="update()"></span>
+		</span>
+	</div>
+	<div class="hidden" id="files">
+		Files
+		<div id="filearea">
+		</div>
+	</div>	
+	<div id="sounds"></div>
+</div>
+
+<small>check out <a href="https://youtube.com/bitlunislab">bitluni's lab</a></small>
+</body></html>
